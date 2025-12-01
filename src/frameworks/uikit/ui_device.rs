@@ -3,20 +3,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-//! The UIKit framework.
-//!
-//! For the time being the focus of this project is on running games, which are
-//! likely to use UIKit in very simple and limited ways, so this implementation
-//! will probably take a lot of shortcuts.
+//! `UIDevice`.
 
-use crate::{msg, Environment};
-use std::time::Instant;
-
+// --- ESTA ES LA PARTE QUE FALTABA ---
+// Definimos los módulos hijos para que el compilador sepa que existen.
 pub mod ui_accelerometer;
 pub mod ui_activity_indicator_view;
 pub mod ui_application;
 pub mod ui_color;
-pub mod ui_device;
+// pub mod ui_device; // Este NO, porque somos nosotros mismos
 pub mod ui_event;
 pub mod ui_font;
 pub mod ui_geometry;
@@ -29,145 +24,137 @@ pub mod ui_screen;
 pub mod ui_touch;
 pub mod ui_view;
 pub mod ui_view_controller;
+// ------------------------------------
 
-pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
-    path: "/System/Library/Frameworks/UIKit.framework/UIKit",
-    aliases: &[],
-    class_exports: &[
-        ui_accelerometer::CLASSES,
-        ui_activity_indicator_view::CLASSES,
-        ui_application::CLASSES,
-        ui_color::CLASSES,
-        ui_device::CLASSES,
-        ui_event::CLASSES,
-        ui_font::CLASSES,
-        ui_image::CLASSES,
-        ui_image_picker_controller::CLASSES,
-        ui_nib::CLASSES,
-        ui_responder::CLASSES,
-        ui_screen::CLASSES,
-        ui_touch::CLASSES,
-        ui_view::CLASSES,
-        ui_view::ui_alert_view::CLASSES,
-        ui_view::ui_control::CLASSES,
-        ui_view::ui_control::ui_button::CLASSES,
-        ui_view::ui_control::ui_segmented_control::CLASSES,
-        ui_view::ui_control::ui_slider::CLASSES,
-        ui_view::ui_control::ui_text_field::CLASSES,
-        ui_view::ui_control::ui_switch::CLASSES,
-        ui_view::ui_image_view::CLASSES,
-        ui_view::ui_label::CLASSES,
-        ui_view::ui_picker_view::CLASSES,
-        ui_view::ui_scroll_view::CLASSES,
-        ui_view::ui_scroll_view::ui_text_view::CLASSES,
-        ui_view::ui_web_view::CLASSES,
-        ui_view::ui_window::CLASSES,
-        ui_view_controller::CLASSES,
-        ui_view_controller::ui_navigation_controller::CLASSES,
-    ],
-    constant_exports: &[
-        ui_application::CONSTANTS,
-        ui_device::CONSTANTS,
-        ui_view::ui_control::ui_text_field::CONSTANTS,
-        ui_view::ui_window::CONSTANTS,
-    ],
-    function_exports: &[
-        ui_application::FUNCTIONS,
-        ui_geometry::FUNCTIONS,
-        ui_graphics::FUNCTIONS,
-    ],
-};
+use crate::dyld::ConstantExports;
+use crate::dyld::HostConstant;
+use crate::frameworks::foundation::{ns_string, NSInteger};
+use crate::objc::{id, msg, objc_classes, ClassExports, TrivialHostObject};
+use crate::window::{get_battery_status, BatteryState, DeviceOrientation};
+
+pub const UIDeviceOrientationDidChangeNotification: &str =
+    "UIDeviceOrientationDidChangeNotification";
+
+pub type UIDeviceOrientation = NSInteger;
+#[allow(dead_code)]
+pub const UIDeviceOrientationUnknown: UIDeviceOrientation = 0;
+pub const UIDeviceOrientationPortrait: UIDeviceOrientation = 1;
+#[allow(dead_code)]
+pub const UIDeviceOrientationPortraitUpsideDown: UIDeviceOrientation = 2;
+pub const UIDeviceOrientationLandscapeLeft: UIDeviceOrientation = 3;
+pub const UIDeviceOrientationLandscapeRight: UIDeviceOrientation = 4;
+#[allow(dead_code)]
+pub const UIDeviceOrientationFaceUp: UIDeviceOrientation = 5;
+#[allow(dead_code)]
+pub const UIDeviceOrientationFaceDown: UIDeviceOrientation = 6;
+
+pub type UIDeviceBatteryState = NSInteger;
+pub const UIDeviceBatteryStateUnknown: UIDeviceBatteryState = 0;
+pub const UIDeviceBatteryStateUnplugged: UIDeviceBatteryState = 1;
+pub const UIDeviceBatteryStateCharging: UIDeviceBatteryState = 2;
+pub const UIDeviceBatteryStateFull: UIDeviceBatteryState = 3;
 
 #[derive(Default)]
 pub struct State {
-    ui_accelerometer: ui_accelerometer::State,
-    ui_application: ui_application::State,
-    ui_color: ui_color::State,
-    ui_device: ui_device::State,
-    ui_font: ui_font::State,
-    ui_graphics: ui_graphics::State,
-    ui_image: ui_image::State,
-    ui_screen: ui_screen::State,
-    ui_touch: ui_touch::State,
-    pub ui_view: ui_view::State,
-    ui_responder: ui_responder::State,
+    current_device: Option<id>,
 }
 
-/// For use by `NSRunLoop`: handles any events that have queued up.
-///
-/// Returns the next time this function must be called, if any, e.g. the next
-/// time an accelerometer input is due.
-pub fn handle_events(env: &mut Environment) -> Option<Instant> {
-    use crate::window::Event;
-    use crate::window::TextInputEvent;
+pub const CONSTANTS: ConstantExports = &[(
+    "_UIDeviceOrientationDidChangeNotification",
+    HostConstant::NSString(UIDeviceOrientationDidChangeNotification),
+)];
 
-    loop {
-        // NSRunLoop will never call this function in headless mode.
-        let Some(event) = env.window.as_mut().unwrap().pop_event() else {
-            break;
-        };
+pub const CLASSES: ClassExports = objc_classes! {
 
-        match event {
-            Event::Quit => {
-                echo!("User requested quit, exiting.");
-                ui_application::exit(env);
-            }
-            Event::TouchesDown(..) | Event::TouchesMove(..) | Event::TouchesUp(..) => {
-                ui_touch::handle_event(env, event)
-            }
-            Event::AppWillResignActive => {
-                // Getting this event means touchHLE is becoming inactive, e.g.
-                // due to switching apps. The obvious way to handle this would
-                // be to just send `applicationWillResignActive:` to the
-                // UIApplicationDelegate. However:
-                // - touchHLE's event loop can't handle an inactive app well
-                //   right now. For example, audio isn't paused.
-                // - touchHLE's event loop can't handle the subsequent
-                //   termination of an app right now: it doesn't manage to send
-                //   the `applicationWillTerminate:` message in time. This can
-                //   mean loss of data!
-                // Therefore, for the moment we will simulate the early iOS
-                // behavior where switching app usually resulted in termination.
-                // We can usually handle this in time, so there won't be data
-                // loss, nor problems with background resource usage or audio.
-                // TODO: Handle this better.
-                log!("Handling app-will-resign-active event: exiting.");
-                ui_application::exit(env);
-            }
-            Event::AppWillTerminate => {
-                log!("Handling app-will-terminate event.");
-                ui_application::exit(env);
-            }
-            Event::EnterDebugger => {
-                if env.is_debugging_enabled() {
-                    log!("Handling EnterDebugger event: entering debugger.");
-                    let step = env.enter_debugger(/* reason: */ None);
-                    assert!(!step, "Can't step right now!"); // TODO?
-                } else {
-                    log!("Ignoring EnterDebugger event: no debugger connected.");
-                }
-            }
-            Event::TextInput(text_event) => {
-                let responder = env.framework_state.uikit.ui_responder.first_responder;
-                let class = msg![env; responder class];
-                let ui_text_field_class = env.objc.get_known_class("UITextField", &mut env.mem);
-                if !responder.is_null() && env.objc.class_is_subclass_of(class, ui_text_field_class)
-                {
-                    match text_event {
-                        TextInputEvent::Text(text) => {
-                            ui_view::ui_control::ui_text_field::handle_text(env, responder, text)
-                        }
-                        TextInputEvent::Backspace => {
-                            ui_view::ui_control::ui_text_field::handle_backspace(env, responder)
-                        }
-                        TextInputEvent::Return => {
-                            ui_view::ui_control::ui_text_field::handle_return(env, responder)
-                        }
-                    }
-                }
-            }
-        }
+(env, this, _cmd);
+
+@implementation UIDevice: NSObject
+
++ (id)currentDevice {
+    if let Some(device) = env.framework_state.uikit.ui_device.current_device {
+        device
+    } else {
+        let new = env.objc.alloc_static_object(
+            this,
+            Box::new(TrivialHostObject),
+            &mut env.mem
+        );
+        env.framework_state.uikit.ui_device.current_device = Some(new);
+        new
     }
-
-    ui_accelerometer::handle_accelerometer(env)
 }
+
+- (())beginGeneratingDeviceOrientationNotifications {}
+- (())endGeneratingDeviceOrientationNotifications {}
+
+- (id)model {
+    ns_string::get_static_str(env, "iPhone")
+}
+- (id)localizedModel {
+    msg![env; this model]
+}
+
+- (id)name {
+    ns_string::get_static_str(env, "iPhone")
+}
+
+- (id)systemName {
+    ns_string::get_static_str(env, "iPhone OS")
+}
+
+// NSString
+- (id)systemVersion {
+    // Parche: 3.0 para compatibilidad
+    ns_string::get_static_str(env, "3.0")
+}
+
+- (id)uniqueIdentifier {
+    // --- PARCHE GEMINI: UDID FIJO ---
+    ns_string::get_static_str(env, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
+}
+
+- (bool)isMultitaskingSupported {
+    false
+}
+
+- (UIDeviceOrientation)orientation {
+    match env.window().current_rotation() {
+        DeviceOrientation::Portrait => UIDeviceOrientationPortrait,
+        DeviceOrientation::LandscapeLeft => UIDeviceOrientationLandscapeLeft,
+        DeviceOrientation::LandscapeRight => UIDeviceOrientationLandscapeRight
+    }
+}
+- (())setOrientation:(UIDeviceOrientation)orientation {
+    env.window_mut().rotate_device(match orientation {
+        UIDeviceOrientationPortrait => DeviceOrientation::Portrait,
+        UIDeviceOrientationLandscapeLeft => DeviceOrientation::LandscapeLeft,
+        UIDeviceOrientationLandscapeRight => DeviceOrientation::LandscapeRight,
+        _ => unimplemented!("Orientation {} not handled yet", orientation),
+    });
+}
+
+- (bool)isBatteryMonitoringEnabled {
+    true
+}
+- (())setBatteryMonitoringEnabled:(bool)enabled {
+    assert!(enabled);
+}
+- (f32)batteryLevel {
+    let pct = get_battery_status().0;
+    if pct < 0 {
+        return 1.0
+    }
+    pct as f32 / 100.0 
+}
+- (UIDeviceBatteryState)batteryState {
+    match get_battery_status().1 {
+        BatteryState::Unknown => UIDeviceBatteryStateUnknown,
+        BatteryState::OnBattery => UIDeviceBatteryStateUnplugged,
+        BatteryState::NoBattery | BatteryState::Charging => UIDeviceBatteryStateCharging,
+        BatteryState::Full => UIDeviceBatteryStateFull,
+    }
+}
+
+@end
+
+};
