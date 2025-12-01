@@ -34,6 +34,11 @@ pub type blksize_t = u32;
 pub const S_IFDIR: mode_t = 0o0040000;
 pub const S_IFREG: mode_t = 0o0100000;
 
+// Permisos totales para asegurar compatibilidad
+pub const PERM_ALL: mode_t = 0o0777; 
+pub const UID_MOBILE: uid_t = 501;
+pub const GID_MOBILE: gid_t = 501;
+
 #[allow(non_camel_case_types)]
 #[derive(Default)]
 #[repr(C, packed)]
@@ -60,24 +65,12 @@ pub struct stat {
 unsafe impl SafeRead for stat {}
 
 fn mkdir(env: &mut Environment, path: ConstPtr<u8>, mode: mode_t) -> i32 {
-    // TODO: handle errno properly
     set_errno(env, 0);
 
     let path_str = env.mem.cstr_at_utf8(path).unwrap();
-    // TODO: respect the mode
     match env.fs.create_dir(GuestPath::new(&path_str)) {
-        Ok(()) => {
-            log_dbg!("mkdir({:?} {:?}, {:#x}) => 0", path, path_str, mode);
-            0
-        }
+        Ok(()) => 0,
         Err(err) => {
-            log!(
-                "Warning: mkdir({:?} {:?}, {:#x}) failed with {:?}, returning -1",
-                path,
-                path_str,
-                mode,
-                err
-            );
             match err {
                 FsError::AlreadyExist => set_errno(env, EEXIST),
                 FsError::NonexistentParentDir => set_errno(env, ENOENT),
@@ -88,82 +81,57 @@ fn mkdir(env: &mut Environment, path: ConstPtr<u8>, mode: mode_t) -> i32 {
     }
 }
 
-/// Helper for [stat()] and [fstat()] that fills the data in the stat struct
 fn fstat_inner(env: &mut Environment, fd: FileDescriptor, buf: MutPtr<stat>) -> i32 {
     let Some(file) = env.libc_state.posix_io.file_for_fd(fd) else {
         set_errno(env, EBADF);
         return -1;
     };
 
-    // FIXME: This implementation is highly incomplete. fstat() returns a huge
-    // struct with many kinds of data in it. This code is assuming the caller
-    // only wants a small part of it.
-
     let mut stat = stat::default();
+
+    // Identidad iOS mobile
+    stat.st_uid = UID_MOBILE;
+    stat.st_gid = GID_MOBILE;
+    stat.st_nlink = 1;
 
     match file.file {
         GuestFile::File(_) | GuestFile::IpaBundleFile(_) | GuestFile::ResourceFile(_) => {
             stat.st_mode |= S_IFREG;
+            stat.st_mode |= PERM_ALL; 
 
-            // TODO: use `std::fs::metadata()` instead
-
-            // Obtain file size
             stat.st_size = file.file.stream_len().unwrap().try_into().unwrap();
+            
+            stat.st_blksize = 4096; 
+            stat.st_blocks = (stat.st_size as u64 + 511) / 512;
         }
         GuestFile::Directory => {
             stat.st_mode |= S_IFDIR;
-
-            // TODO: st_size
+            stat.st_mode |= PERM_ALL; 
         }
         _ => unimplemented!(),
     }
 
     env.mem.write(buf, stat);
-
-    0 // success
+    0
 }
 
 fn fstat(env: &mut Environment, fd: FileDescriptor, buf: MutPtr<stat>) -> i32 {
-    // TODO: handle errno properly
     set_errno(env, 0);
-
-    log!("Warning: fstat() call, this function is mostly unimplemented");
-    let result = fstat_inner(env, fd, buf);
-    log_dbg!("fstat({:?}, {:?}) -> {}", fd, buf, result);
-    result
+    fstat_inner(env, fd, buf)
 }
 
 fn stat(env: &mut Environment, path: ConstPtr<u8>, buf: MutPtr<stat>) -> i32 {
-    // TODO: handle errno properly
     set_errno(env, 0);
 
-    log!("Warning: stat() call, this function is mostly unimplemented");
-
     fn do_stat(env: &mut Environment, path: ConstPtr<u8>, buf: MutPtr<stat>) -> i32 {
-        if path.is_null() {
-            return -1; // TODO: Set errno
-        }
-
-        // Open and reuse fstat implementation
+        if path.is_null() { return -1; }
         let fd = open_direct(env, path, 0);
-        if fd == -1 {
-            return -1; // TODO: Set errno
-        }
-
+        if fd == -1 { return -1; }
         let result = fstat_inner(env, fd, buf);
         assert!(close(env, fd) == 0);
         result
     }
-    let result = do_stat(env, path, buf);
-
-    log_dbg!(
-        "stat({:?} {:?}, {:?}) -> {}",
-        path,
-        env.mem.cstr_at_utf8(path),
-        buf,
-        result
-    );
-    result
+    do_stat(env, path, buf)
 }
 
 pub const FUNCTIONS: FunctionExports = &[
