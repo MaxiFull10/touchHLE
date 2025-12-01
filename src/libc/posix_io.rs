@@ -1,3 +1,4 @@
+#![allow(warnings)]
 /*
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -127,10 +128,6 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
     if (flags & O_APPEND) != 0 { options.append(); }
     if (flags & O_CREAT) != 0 { options.create(); }
     if (flags & O_TRUNC) != 0 { options.truncate(); }
-
-    if flags & O_NOFOLLOW != 0 {
-        log!("Ignoring O_NOFOLLOW when opening {:?}", path_string);
-    }
     
     let res = match env
         .fs
@@ -146,7 +143,6 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
             find_or_create_fd(env, host_object)
         }
         Err(_) => {
-            // Intentamos fallback a solo lectura si falló la escritura
             if (flags & O_ACCMODE) == O_RDONLY {
                 let mut ro_options = GuestOpenOptions::new();
                 ro_options.read();
@@ -181,13 +177,8 @@ pub fn read(
     size: GuestUSize,
 ) -> GuestISize {
     set_errno(env, 0);
-
     if buffer.is_null() { return -1; }
-
-    let Some(file) = env.libc_state.posix_io.file_for_fd(fd) else {
-        return -1;
-    };
-
+    let Some(file) = env.libc_state.posix_io.file_for_fd(fd) else { return -1; };
     let buffer_slice = env.mem.bytes_at_mut(buffer.cast(), size);
     match file.file.read(buffer_slice) {
         Ok(bytes_read) => {
@@ -196,9 +187,7 @@ pub fn read(
             }
             bytes_read.try_into().unwrap()
         }
-        Err(_) => {
-            -1
-        }
+        Err(_) => -1
     }
 }
 
