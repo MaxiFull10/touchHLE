@@ -1,3 +1,4 @@
+#![allow(warnings)]
 /*
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -147,25 +148,251 @@ pub const CLASSES: ClassExports = objc_classes! {
     res_exists
 }
 
-// --- APLANADORA V2 (Sin logs para evitar errores de macro) ---
+// --- ESCRITURA LIMPIA (DELETE + WRITE RAW) ---
 - (bool)createFileAtPath:(id)path 
                 contents:(id)data 
               attributes:(id)attributes { 
     assert!(attributes == nil); 
 
     let path_str = ns_string::to_rust_string(env, path); 
+    let guest_path = GuestPath::new(&path_str);
 
-    // TRUCO DE LA APLANADORA:
-    // Si es el archivo de guardado, intentamos borrarlo antes de escribir.
-    // Usamos un bloque {} simple para evitar problemas de sintaxis.
-    if path_str.contains("profile.dat") {
-        let guest_path = GuestPath::new(&path_str);
-        if env.fs.exists(guest_path) {
-            let _ = env.fs.remove(guest_path);
-        }
+    // 1. Preparar los datos
+    let empty_data: &[u8] = &[];
+    let data_slice = if data == nil {
+        empty_data
+    } else {
+        let bytes_ptr: ConstPtr<u8> = msg![env; data bytes];
+        let length: NSUInteger = msg![env; data length];
+        env.mem.bytes_at(bytes_ptr, length as usize)
+    };
+
+    // 2. BORRADO PREVENTIVO (Crucial para evitar corrupción al final del archivo)
+    if env.fs.exists(guest_path) {
+        // Intentamos borrar. Si falla (ej: archivo en uso), seguimos adelante
+        // con la esperanza de que el write lo trunque, pero el remove es más seguro.
+        let _ = env.fs.remove(guest_path);
     }
 
-    if data == nil {
+    // 3. ESCRITURA FRESCA
+    // Al haber borrado (o al usar write que trunca), el archivo se crea de 0
+    // con el tamaño exacto de los nuevos datos. Sin basura al final.
+    match env.fs.write(guest_path, data_slice) {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+// --------------------------------------------
+
+- (bool)removeItemAtPath:(id)path 
+                   error:(MutPtr<id>)error { 
+    let path = ns_string::to_rust_string(env, path); 
+    match env.fs.remove(GuestPath::new(&path)) {
+        Ok(()) => true,
+        Err(()) => {
+            if !error.is_null() {
+                todo!(); 
+            }
+            false
+        }
+    }
+}
+
+- (bool)createDirectoryAtPath:(id)path 
+                   attributes:(id)attributes { 
+    let error: MutPtr<id> = Ptr::null();
+    msg![env; this createDirectoryAtPath:path
+             withIntermediateDirectories:false
+                              attributes:attributes
+                                   error:error]
+}
+
+- (bool)createDirectoryAtPath:(id)path 
+  withIntermediateDirectories:(bool)with_intermediates
+                   attributes:(id)attributes 
+                        error:(MutPtr<id>)error { 
+    assert_eq!(attributes, nil); 
+
+    let path_str = ns_string::to_rust_string(env, path); 
+    let res = if with_intermediates {
+        env.fs.create_dir_all(GuestPath::new(&path_str))
+    } else {
+        env.fs.create_dir(GuestPath::new(&path_str))
+    };
+    match res {
+        Ok(()) => {
+            true
+        }
+        Err(err) => {
+            assert!(error.is_null()); 
+            // log error
+            false
+        }
+    }
+}
+
+- (id)enumeratorAtPath:(id)path { 
+    let path = ns_string::to_rust_string(env, path); 
+    let Ok(paths) = env.fs.enumerate_recursive(GuestPath::new(&path)) else {
+        return nil;
+    };
+    let host_object = Box::new(NSDirectoryEnumeratorHostObject {
+        iterator: paths.into_iter(),
+    });
+    let class = env.objc.get_known_class("NSDirectoryEnumerator", &mut env.mem);
+    let enumerator = env.objc.alloc_object(class, host_object, &mut env.mem);
+    autorelease(env, enumerator)
+}
+
+- (id)directoryContentsAtPath:(id)path { 
+    let path_str = ns_string::to_rust_string(env, path); 
+    let Ok(paths) = env.fs.enumerate(GuestPath::new(&path_str)) else {
+        return nil;
+    };
+    let paths: Vec<GuestPathBuf> = paths
+        .map(|path| GuestPathBuf::from(GuestPath::new(path)))
+        .collect();
+    
+    let path_strings = paths
+        .iter()
+        .map(|name| ns_string::from_rust_string(env, name.as_str().to_string()))
+        .collect();
+    let res = ns_array::from_vec(env, path_strings);
+    autorelease(env, res)
+}
+
+- (id)contentsOfDirectoryAtPath:(id)path 
+                          error:(MutPtr<id>)error { 
+    let contents: id = msg![env; this directoryContentsAtPath:path];
+    if contents == nil && !error.is_null() {
+        todo!(); 
+    }
+    contents
+}
+
+- (bool)isReadableFileAtPath:(id)_path { 
+    true
+}
+
+- (bool)isWritableFileAtPath:(id)_path { 
+    true
+}
+
+- (bool)isDeletableFileAtPath:(id)_path { 
+    true
+}
+
+- (id)contentsAtPath:(id)path { 
+    assert!(msg![env; path isAbsolutePath]);
+    msg_class![env; NSData dataWithContentsOfFile:path]
+}
+
+- (bool)copyItemAtPath:(id)src 
+                toPath:(id)dst 
+                 error:(MutPtr<id>)error { 
+    let src = ns_string::to_rust_string(env, src);
+    let dst = ns_string::to_rust_string(env, dst);
+    let data = match env.fs.read(GuestPath::new(src.as_ref())) {
+        Ok(d) => d,
+        Err(_) => {
+            assert!(error.is_null()); 
+            return false;
+        }
+    };
+    if env.fs.write(GuestPath::new(dst.as_ref()), &data).is_err() {
+        assert!(error.is_null()); 
+        return false;
+    }
+    true
+}
+
+- (ConstPtr<u8>)fileSystemRepresentationWithPath:(id)path { 
+    let length: NSUInteger = msg![env; path length];
+    assert!(length > 0);
+    msg![env; path UTF8String]
+}
+
+- (id)fileAttributesAtPath:(id)path 
+              traverseLink:(bool)_traverse {
+    let path_str = ns_string::to_rust_string(env, path); 
+    let guest_path = GuestPath::new(&path_str);
+    file_attributes_common(env, guest_path)
+}
+
+- (id)attributesOfItemAtPath:(id)path 
+                       error:(MutPtr<id>)error { 
+    assert!(error.is_null()); 
+    let path_str = ns_string::to_rust_string(env, path); 
+    let guest_path = GuestPath::new(&path_str);
+    file_attributes_common(env, guest_path)
+}
+
+- (id)attributesOfFileSystemForPath:(id)_path
+                              error:(MutPtr<id>)error {
+    assert!(error.is_null()); 
+
+    let dict = msg_class![env; NSMutableDictionary new];
+
+    let size: u64 = 1024 * 1024 * 1024;
+    let size_num: id = msg_class![env; NSNumber numberWithUnsignedLongLong:size];
+
+    let fs_free_size_key = get_static_str(env, NSFileSystemFreeSize);
+    () = msg![env; dict setObject:size_num forKey:fs_free_size_key];
+
+    let dict_imm = msg![env; dict copy];
+    release(env, dict);
+    autorelease(env, dict_imm)
+}
+
+@end
+
+@implementation NSDirectoryEnumerator: NSEnumerator
+
+- (id)nextObject {
+    let host_obj = env.objc.borrow_mut::<NSDirectoryEnumeratorHostObject>(this);
+    host_obj.iterator.next().map_or(nil, |s| ns_string::from_rust_string(env, String::from(s)))
+}
+
+@end
+
+};
+
+fn file_attributes_common(env: &mut Environment, guest_path: &GuestPath) -> id {
+    if !env.fs.exists(guest_path) {
+        return nil;
+    }
+
+    let is_file = env.fs.is_file(guest_path);
+    
+    let unix_timestamp: f64 = env.fs.modified(guest_path).unwrap() as f64;
+    let unix_ref_date: id = msg_class![env; NSDate dateWithTimeIntervalSince1970:0f64];
+    let unix_date: id =
+        msg_class![env; NSDate dateWithTimeInterval:unix_timestamp sinceDate:unix_ref_date];
+
+    let size = env.fs.size(guest_path).unwrap();
+    let size_num: id = msg_class![env; NSNumber numberWithUnsignedLongLong:size];
+
+    let dict = msg_class![env; NSMutableDictionary new];
+
+    let modif_date_key = get_static_str(env, NSFileModificationDate);
+    () = msg![env; dict setObject:unix_date forKey:modif_date_key];
+
+    let size_key = get_static_str(env, NSFileSize);
+    () = msg![env; dict setObject:size_num forKey:size_key];
+
+    let type_key = ns_string::from_rust_string(env, String::from("NSFileType"));
+    let type_val_str = if is_file { "NSFileTypeRegular" } else { "NSFileTypeDirectory" };
+    let type_val = ns_string::from_rust_string(env, String::from(type_val_str));
+    () = msg![env; dict setObject:type_val forKey:type_key];
+
+    let perm_key = ns_string::from_rust_string(env, String::from("NSFilePosixPermissions"));
+    let perm_val: id = msg_class![env; NSNumber numberWithInt:511];
+    () = msg![env; dict setObject:perm_val forKey:perm_key];
+
+    let dict_imm = msg![env; dict copy];
+    release(env, dict);
+    autorelease(env, dict_imm)
+}    if data == nil {
         let empty: id = msg_class![env; NSData new];
         let res: bool = msg![env; empty writeToFile:path atomically:false];
         release(env, empty);
