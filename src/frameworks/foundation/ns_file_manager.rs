@@ -10,7 +10,8 @@ use super::{ns_array, ns_string, NSUInteger};
 use crate::dyld::{export_c_func, ConstantExports, FunctionExports, HostConstant};
 use crate::frameworks::foundation::ns_string::get_static_str;
 use crate::fs::{GuestPath, GuestPathBuf};
-use crate::mem::{ConstPtr, MutPtr, Ptr};
+// Importaciones necesarias
+use crate::mem::{ConstPtr, ConstVoidPtr, MutPtr, Ptr, GuestUSize};
 use crate::objc::{
     autorelease, id, msg, msg_class, nil, objc_classes, release, ClassExports, HostObject,
 };
@@ -148,33 +149,64 @@ pub const CLASSES: ClassExports = objc_classes! {
     res_exists
 }
 
-// --- APLANADORA V2 (Segura) ---
+// --- SISTEMA COMPLETO DE GUARDADO (CORREGIDO) ---
 - (bool)createFileAtPath:(id)path 
                 contents:(id)data 
               attributes:(id)attributes { 
     assert!(attributes == nil); 
 
     let path_str = ns_string::to_rust_string(env, path); 
-
-    // 1. Borrado preventivo si es profile.dat
+    
     if path_str.contains("profile.dat") {
+        log!("!!! GEMINI SAVE: Request to write profile.dat");
         let guest_path = GuestPath::new(&path_str);
+        
         if env.fs.exists(guest_path) {
+            log!("!!! GEMINI SAVE: File exists, attempting backup...");
+            if let Ok(current_data) = env.fs.read(guest_path) {
+                 let backup_name = format!("{}.bak", path_str);
+                 let backup_path = GuestPath::new(&backup_name);
+                 // CORRECCIÓN: Bloques {} para evitar el error de macro
+                 match env.fs.write(backup_path, &current_data) {
+                     Ok(_) => { log!("!!! GEMINI SAVE: Backup created successfully!"); }
+                     Err(_) => { log!("!!! GEMINI SAVE: Error creating backup."); }
+                 }
+            }
+            
             let _ = env.fs.remove(guest_path);
+            log!("!!! GEMINI SAVE: Original file deleted.");
+        } else {
+            log!("!!! GEMINI SAVE: File does not exist (First Save), skipping backup.");
         }
     }
 
-    // 2. Escritura
     if data == nil {
         let empty: id = msg_class![env; NSData new];
         let res: bool = msg![env; empty writeToFile:path atomically:false];
         release(env, empty);
         res
     } else {
-        msg![env; data writeToFile:path atomically:false]
+        let bytes_void: ConstVoidPtr = msg![env; data bytes];
+        let bytes_ptr: ConstPtr<u8> = bytes_void.cast();
+        
+        let length: NSUInteger = msg![env; data length];
+        let length_u32: GuestUSize = (length as usize).try_into().unwrap_or(0);
+        
+        let data_slice = env.mem.bytes_at(bytes_ptr, length_u32);
+
+        let guest_path = GuestPath::new(&path_str);
+        match env.fs.write(guest_path, data_slice) {
+            Ok(_) => {
+                if path_str.contains("profile.dat") {
+                    log!("!!! GEMINI SAVE: New file written successfully ({} bytes)", length);
+                }
+                true
+            },
+            Err(_) => false,
+        }
     }
 }
-// ----------------------------
+// ------------------------------------
 
 - (bool)removeItemAtPath:(id)path 
                    error:(MutPtr<id>)error { 
@@ -212,8 +244,10 @@ pub const CLASSES: ClassExports = objc_classes! {
         env.fs.create_dir(GuestPath::new(&path_str))
     };
     match res {
-        Ok(()) => true,
-        Err(_) => {
+        Ok(()) => {
+            true
+        }
+        Err(err) => {
             assert!(error.is_null()); 
             false
         }
@@ -369,7 +403,6 @@ fn file_attributes_common(env: &mut Environment, guest_path: &GuestPath) -> id {
     let size_key = get_static_str(env, NSFileSize);
     () = msg![env; dict setObject:size_num forKey:size_key];
 
-    // PARCHE DE ATRIBUTOS
     let type_key = ns_string::from_rust_string(env, String::from("NSFileType"));
     let type_val_str = if is_file { "NSFileTypeRegular" } else { "NSFileTypeDirectory" };
     let type_val = ns_string::from_rust_string(env, String::from(type_val_str));
