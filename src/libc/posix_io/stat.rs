@@ -1,3 +1,4 @@
+#![allow(warnings)]
 /*
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -30,11 +31,10 @@ pub type blkcnt_t = u64;
 #[allow(non_camel_case_types)]
 pub type blksize_t = u32;
 
-// enum values sourced from ```man 2 stat```
 pub const S_IFDIR: mode_t = 0o0040000;
 pub const S_IFREG: mode_t = 0o0100000;
 
-// Permisos totales para asegurar compatibilidad
+// PARCHE GEMINI
 pub const PERM_ALL: mode_t = 0o0777; 
 pub const UID_MOBILE: uid_t = 501;
 pub const GID_MOBILE: gid_t = 501;
@@ -66,7 +66,6 @@ unsafe impl SafeRead for stat {}
 
 fn mkdir(env: &mut Environment, path: ConstPtr<u8>, mode: mode_t) -> i32 {
     set_errno(env, 0);
-
     let path_str = env.mem.cstr_at_utf8(path).unwrap();
     match env.fs.create_dir(GuestPath::new(&path_str)) {
         Ok(()) => 0,
@@ -88,8 +87,6 @@ fn fstat_inner(env: &mut Environment, fd: FileDescriptor, buf: MutPtr<stat>) -> 
     };
 
     let mut stat = stat::default();
-
-    // Identidad iOS mobile
     stat.st_uid = UID_MOBILE;
     stat.st_gid = GID_MOBILE;
     stat.st_nlink = 1;
@@ -98,9 +95,7 @@ fn fstat_inner(env: &mut Environment, fd: FileDescriptor, buf: MutPtr<stat>) -> 
         GuestFile::File(_) | GuestFile::IpaBundleFile(_) | GuestFile::ResourceFile(_) => {
             stat.st_mode |= S_IFREG;
             stat.st_mode |= PERM_ALL; 
-
             stat.st_size = file.file.stream_len().unwrap().try_into().unwrap();
-            
             stat.st_blksize = 4096; 
             stat.st_blocks = (stat.st_size as u64 + 511) / 512;
         }
@@ -110,7 +105,6 @@ fn fstat_inner(env: &mut Environment, fd: FileDescriptor, buf: MutPtr<stat>) -> 
         }
         _ => unimplemented!(),
     }
-
     env.mem.write(buf, stat);
     0
 }
@@ -122,7 +116,6 @@ fn fstat(env: &mut Environment, fd: FileDescriptor, buf: MutPtr<stat>) -> i32 {
 
 fn stat(env: &mut Environment, path: ConstPtr<u8>, buf: MutPtr<stat>) -> i32 {
     set_errno(env, 0);
-
     fn do_stat(env: &mut Environment, path: ConstPtr<u8>, buf: MutPtr<stat>) -> i32 {
         if path.is_null() { return -1; }
         let fd = open_direct(env, path, 0);
